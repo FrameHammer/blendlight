@@ -1629,7 +1629,7 @@ static void bone_draw_wire(const Armatures::DrawContext *ctx,
  * \{ */
 
 /* Радиус сферы джоинта в единицах арматуры (аналог Joint Size в Maya). */
-static constexpr float MAYA_JOINT_RADIUS = 0.03f;
+static constexpr float MAYA_JOINT_RADIUS = 0.1f;
 /* Минимальная толщина линий: без неё невыделенный скелет в Object Mode невидим
  * (у невыделенной арматуры ctx->const_wire == 0). */
 static constexpr float MAYA_JOINT_MIN_WIRE = 1.0f;
