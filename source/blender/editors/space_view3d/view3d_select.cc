@@ -1066,7 +1066,7 @@ static void do_lasso_select_armature__doSelectBone(void *user_data,
     if (BLI_rcti_isect_pt(data->rect, UNPACK2(screen_co_b)) &&
         BLI_lasso_is_point_inside(data->mcoords, UNPACK2(screen_co_b), INT_MAX))
     {
-      /* Maya-style joints: tail не выделяется отдельно. */
+      is_inside_flag |= BONESEL_TIP;
     }
   }
   else {
@@ -5198,9 +5198,11 @@ static void do_circle_select_armature__doSelectBone(void *user_data,
   }
 
   /* Project tail location to screen-space. */
-  /* Maya-style joints: tail не выделяется отдельно, но нужен для проверки всей кости. */
   if (screen_co_b[0] != IS_CLIPPED) {
     points_proj_tot++;
+    if (armature_circle_doSelectJoint(data, ebone, screen_co_b, false)) {
+      is_point_done = true;
+    }
   }
 
   /* check if the head and/or tail is in the circle
