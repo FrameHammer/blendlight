@@ -7,6 +7,7 @@ import datetime
 import math
 import numpy as np
 import os
+import re
 import time
 
 from itertools import zip_longest
@@ -2447,13 +2448,39 @@ def fbx_animations_do(scene_data, ref_id, f_start, f_end, start_zero, objects=No
 
     astack_key = get_blender_anim_stack_key(scene, ref_id)
     alayer_key = get_blender_anim_layer_key(scene, ref_id)
-    name = (get_blenderID_name(ref_id) if ref_id else scene.name).encode()
+    if isinstance(ref_id, tuple):
+        # Take of an action (object, action): use the action name exactly as in the scene.
+        name = ref_id[1].name.encode()
+    else:
+        name = (get_blenderID_name(ref_id) if ref_id else scene.name).encode()
 
     if start_zero:
         f_end -= f_start
         f_start = 0.0
 
     return (astack_key, animations, alayer_key, name, f_start, f_end) if animations else None
+
+
+def fbx_find_action_slot(act, path_resolve) -> bpy.types.ActionSlot | None:
+    """Slot of the action whose F-Curves are all valid for the data-block (given by its path_resolve)."""
+    for layer in act.layers:
+        for strip in layer.strips:
+            for channelbag in strip.channelbags:
+                if not channelbag.fcurves:
+                    # Do not export empty Channelbags.
+                    continue
+                for fc in channelbag.fcurves:
+                    data_path = fc.data_path
+                    if fc.array_index:
+                        data_path = data_path + "[%d]" % fc.array_index
+                    try:
+                        path_resolve(data_path)
+                    except ValueError:
+                        break  # Invalid, go to next strip.
+                else:
+                    # Did not 'break', so all F-Curves are valid.
+                    return channelbag.slot
+    return None  # Found nothing to return.
 
 
 def fbx_animations(scene_data):
@@ -2526,25 +2553,6 @@ def fbx_animations(scene_data):
 
     # All actions.
     if scene_data.settings.bake_anim_use_all_actions:
-        def find_validate_action_slot(act, path_resolve) -> bpy.types.ActionSlot | None:
-            for layer in act.layers:
-                for strip in layer.strips:
-                    for channelbag in strip.channelbags:
-                        if not channelbag.fcurves:
-                            # Do not export empty Channelbags.
-                            continue
-                        for fc in channelbag.fcurves:
-                            data_path = fc.data_path
-                            if fc.array_index:
-                                data_path = data_path + "[%d]" % fc.array_index
-                            try:
-                                path_resolve(data_path)
-                            except ValueError:
-                                break  # Invalid, go to next strip.
-                        else:
-                            # Did not 'break', so all F-Curves are valid.
-                            return channelbag.slot
-            return None  # Found nothing to return.
 
         def restore_object(ob_to, ob_from):
             # Restore org state of object (ugh :/ ).
@@ -2588,12 +2596,15 @@ def fbx_animations(scene_data):
             path_resolve = ob.path_resolve
 
             for act in bpy.data.actions:
+                only_action = scene_data.settings.bake_anim_only_action
+                if only_action is not None and act != only_action:
+                    continue
                 # For now, *all* paths in the action must be valid for the object, to validate the action.
                 # Unless that action was already assigned to the object!
                 if act == org_act:
                     act_slot = org_act_slot
                 else:
-                    act_slot = find_validate_action_slot(act, path_resolve)
+                    act_slot = fbx_find_action_slot(act, path_resolve)
                 if not act_slot:
                     continue
                 ob.animation_data.action = act
@@ -3543,6 +3554,7 @@ def save_single(operator, scene, depsgraph, filepath="",
                 armature_nodetype='NULL',
                 colors_type='SRGB',
                 prioritize_active_color=False,
+                bake_anim_only_action=None,
                 **kwargs
                 ):
 
@@ -3609,7 +3621,8 @@ def save_single(operator, scene, depsgraph, filepath="",
         add_leaf_bones, bone_correction_matrix, bone_correction_matrix_inv,
         bake_anim, bake_anim_use_all_bones, bake_anim_use_nla_strips, bake_anim_use_all_actions,
         bake_anim_step, bake_anim_simplify_factor, bake_anim_force_startend_keying,
-        False, media_settings, use_custom_props, colors_type, prioritize_active_color
+        False, media_settings, use_custom_props, colors_type, prioritize_active_color,
+        bake_anim_only_action,
     )
 
     import bpy_extras.io_utils
@@ -3704,6 +3717,32 @@ def defaults_unity3d():
     }
 
 
+def action_file_name(action):
+    """File name for an action: the action name with only the characters invalid in file names replaced."""
+    name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", action.name).strip(" .")
+    return (name or "action") + ".fbx"
+
+
+def save_action_files(operator, context, depsgraph, filepath, ctx_objects, kwargs):
+    """Export each action usable by the exported objects into its own file, named after the action."""
+    dirpath = os.path.dirname(filepath)
+    animated = [ob for ob in ctx_objects
+                if ob.animation_data and not ob.animation_data.is_property_readonly('action')]
+    actions = [act for act in bpy.data.actions
+               if any(fbx_find_action_slot(act, ob.path_resolve) for ob in animated)]
+    if not actions:
+        operator.report({'ERROR'}, "No actions to export for the exported objects")
+        return {'CANCELLED'}
+
+    kwargs = kwargs.copy()
+    kwargs.update(bake_anim=True, bake_anim_use_all_actions=True, bake_anim_use_nla_strips=False)
+    for act in actions:
+        action_filepath = os.path.join(dirpath, action_file_name(act))
+        save_single(operator, context.scene, depsgraph, action_filepath, bake_anim_only_action=act, **kwargs)
+    operator.report({'INFO'}, "Exported %d action(s) to \"%s\"" % (len(actions), dirpath))
+    return {'FINISHED'}
+
+
 def save(operator, context,
          filepath="",
          use_selection=False,
@@ -3712,6 +3751,7 @@ def save(operator, context,
          collection="",
          batch_mode='OFF',
          use_batch_own_dir=False,
+         use_action_files=False,
          **kwargs
          ):
     """
@@ -3768,7 +3808,10 @@ def save(operator, context,
         kwargs_mod["context_objects"] = ctx_objects
 
         depsgraph = context.evaluated_depsgraph_get()
-        ret = save_single(operator, context.scene, depsgraph, filepath, **kwargs_mod)
+        if use_action_files:
+            ret = save_action_files(operator, context, depsgraph, filepath, ctx_objects, kwargs_mod)
+        else:
+            ret = save_single(operator, context.scene, depsgraph, filepath, **kwargs_mod)
     else:
         # XXX We need a way to generate a depsgraph for inactive view_layers first...
         # XXX Also, what to do in case of batch-exporting scenes, when there is more than one view layer?

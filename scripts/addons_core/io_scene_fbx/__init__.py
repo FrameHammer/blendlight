@@ -615,6 +615,12 @@ class ExportFBX(bpy.types.Operator, ExportHelper):
         default=True,
         options={'HIDDEN'},
     )
+    use_action_files: BoolProperty(
+        name="Action Per File",
+        description="Export each action as a separate FBX file named after the action, "
+        "into the chosen folder (the file name is ignored)",
+        default=False,
+    )
 
     def draw(self, context):
         layout = self.layout
@@ -633,7 +639,7 @@ class ExportFBX(bpy.types.Operator, ExportHelper):
 
     @property
     def check_extension(self):
-        return self.batch_mode == 'OFF'
+        return self.batch_mode == 'OFF' and not self.use_action_files
 
     def execute(self, context):
         from mathutils import Matrix
@@ -663,7 +669,9 @@ def export_main(layout, operator, is_file_browser):
     sub.enabled = (operator.path_mode == 'COPY')
     sub.prop(operator, "embed_textures", text="", icon='PACKAGE' if operator.embed_textures else 'UGLYPACKAGE')
     if is_file_browser:
+        layout.prop(operator, "use_action_files")
         row = layout.row(align=True)
+        row.enabled = not operator.use_action_files
         row.prop(operator, "batch_mode")
         sub = row.row(align=True)
         sub.prop(operator, "use_batch_own_dir", text="", icon='NEWFOLDER')
