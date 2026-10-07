@@ -13,6 +13,7 @@ if "bpy" in locals():
 _modules = [
     "add_mesh_torus",
     "anim",
+    "anim_fbx_retarget",
     "assets",
     "bone_selection_sets",
     "clip",

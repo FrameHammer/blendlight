@@ -386,6 +386,7 @@ class TOPBAR_MT_file_import(Menu):
 
         if bpy.app.build_options.io_fbx:
             self.layout.operator("wm.fbx_import", text="FBX (.fbx)")
+            self.layout.operator("anim.fbx_animation_to_armature", text="FBX Animation to Selected Armature")
 
 
 class TOPBAR_MT_file_export(Menu):
