@@ -1624,6 +1624,132 @@ static void bone_draw_wire(const Armatures::DrawContext *ctx,
   }
 }
 
+/** \name Maya-style joints
+ * \{ */
+
+/* Радиус сферы джоинта в единицах арматуры (аналог Joint Size в Maya). */
+static constexpr float MAYA_JOINT_RADIUS = 0.03f;
+/* Минимальная толщина линий: без неё невыделенный скелет в Object Mode невидим. */
+static constexpr float MAYA_JOINT_MIN_WIRE = 1.0f;
+
+/* Базис сегмента: dir — направление на дочерний джоинт, X и Z — перпендикуляры к нему. */
+static void maya_segment_basis(const float4x4 &joint_mat,
+                               const float3 &dir,
+                               float3 &r_x,
+                               float3 &r_z)
+{
+  float3 x = math::normalize(joint_mat.x_axis());
+  x -= dir * math::dot(x, dir);
+  if (math::length_squared(x) < 1e-8f) {
+    ortho_v3_v3(x, dir);
+  }
+  r_x = math::normalize(x);
+  r_z = math::cross(r_x, dir);
+}
+
+static void bone_draw_maya_joint(const Armatures::DrawContext *ctx,
+                                 const UnifiedBonePtr bone,
+                                 const eBone_Flag boneflag,
+                                 const int select_id)
+{
+  const UniformData &theme = ctx->res->theme;
+  const float *col_solid = get_bone_solid_with_consts_color(ctx, bone, boneflag);
+
+  float col_wire[4];
+  copy_v4_v4(col_wire, get_bone_wire_color(ctx, boneflag));
+  col_wire[3] = max_ff(col_wire[3], MAYA_JOINT_MIN_WIRE);
+
+  const bool is_edit = bone.is_editbone();
+  const bool is_select = ctx->res->is_selection();
+  const float4x4 &obmat = ctx->ob->object_to_world();
+  const float r = MAYA_JOINT_RADIUS;
+
+  /* disp_mat масштабирована на длину кости: (0,0,0) = head, (0,1,0) = tail. */
+  const float4x4 joint_mat = float4x4(bone.disp_mat());
+  const float3 head = joint_mat.location();
+
+  /* Контур сферы (+ невидимая заливка в проходе выделения, чтобы легко кликать). */
+  auto draw_sphere = [&](const float3 &center, float radius, const float color[4], int sel) {
+    float4x4 mat = float4x4::identity();
+    mat.x_axis() *= radius * 20.0f; /* Сфера в единичном пространстве имеет радиус 0.05. */
+    mat.y_axis() *= radius * 20.0f;
+    mat.z_axis() *= radius * 20.0f;
+    mat.location() = center;
+    mat = obmat * mat;
+
+    auto id = ctx->res->select_id(*ctx->ob_ref, sel);
+    ctx->bone_buf->sphere_outline_buf.append({mat, color}, id);
+    if (is_select) {
+      ctx->bone_buf->sphere_fill_buf.append({mat, col_solid, col_solid}, id);
+    }
+  };
+
+  /* 1. Джоинт в head. В Edit Mode выделяется как head кости. */
+  float col_head[4];
+  copy_v4_v4(col_head, col_wire);
+  if (is_edit && (bone.flag() & BONE_ROOTSEL)) {
+    copy_v3_v3(col_head, theme.colors.vert_select);
+  }
+  draw_sphere(head, r, col_head, select_id | (is_edit ? BONESEL_ROOT : BONESEL_BONE));
+
+  /* 2. Пирамидки к дочерним джоинтам. */
+  auto sel_bone = ctx->res->select_id(*ctx->ob_ref, select_id | BONESEL_BONE);
+
+  auto draw_segment = [&](const float3 &child_head) {
+    float3 dir = child_head - head;
+    const float len = math::length(dir);
+    if (len < 2.0f * r) {
+      return; /* Джоинты почти совпадают. */
+    }
+    dir /= len;
+
+    float3 x, z;
+    maya_segment_basis(joint_mat, dir, x, z);
+
+    /* Вершина упирается в сферу дочернего джоинта. */
+    const float3 apex = math::transform_point(obmat, child_head - dir * r);
+    const float3 base[4] = {head + x * r, head + z * r, head - x * r, head - z * r};
+    for (const float3 &b : base) {
+      ctx->bone_buf->wire_buf.append(
+          math::transform_point(obmat, b), apex, float4(col_wire), sel_bone);
+    }
+
+    if (is_select) {
+      /* Невидимый октаэдр вдоль сегмента, чтобы кликать по всей пирамидке. */
+      float4x4 seg_mat = float4x4::identity();
+      seg_mat.x_axis() = x * (r * 10.0f);
+      seg_mat.y_axis() = dir * len;
+      seg_mat.z_axis() = z * (r * 10.0f);
+      seg_mat.location() = head;
+      ctx->bone_buf->octahedral_fill_buf.append({obmat * seg_mat, col_solid, col_solid}, sel_bone);
+    }
+  };
+
+  if (is_edit) {
+    const EditBone *ebone = bone.as_editbone();
+    /* В Edit Mode список edit-костей берётся из оригинальной арматуры (как в draw_armature_edit).
+     */
+    bArmature &arm = DRW_object_get_data_for_drawing<bArmature>(*DEG_get_original(ctx->ob));
+    for (EditBone *child : ListBaseWrapper<EditBone>(*arm.edbo)) {
+      if (child->parent == ebone && animrig::bone_is_visible(&arm, child)) {
+        draw_segment(float3(child->head));
+      }
+    }
+  }
+  else {
+    const bPoseChannel *pchan = bone.as_posebone();
+    for (bPoseChannel *child : ListBaseWrapper<bPoseChannel>(ctx->ob->pose->chanbase)) {
+      if (child->parent == pchan &&
+          animrig::bone_is_visible(ctx->armature, {child, child->bone_get(*ctx->ob)}))
+      {
+        draw_segment(float3(child->pose_mat[3]));
+      }
+    }
+  }
+}
+
+/** \} */
+
 static void bone_draw(const eArmature_Drawtype drawtype,
                       const bool use_custom_shape,
                       const Armatures::DrawContext *ctx,
@@ -1638,7 +1764,7 @@ static void bone_draw(const eArmature_Drawtype drawtype,
 
   switch (drawtype) {
     case ARM_DRAW_TYPE_OCTA:
-      bone_draw_octa(ctx, bone, boneflag, select_id);
+      bone_draw_maya_joint(ctx, bone, boneflag, select_id);
       break;
     case ARM_DRAW_TYPE_STICK:
       bone_draw_line(ctx, bone, boneflag, select_id);
