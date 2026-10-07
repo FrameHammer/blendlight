@@ -145,10 +145,6 @@ def _location_bone_names(target_arm, hips_name):
     return names
 
 
-def _without_connected(target_arm, names):
-    return {name for name in names if not target_arm.bones[name].use_connect}
-
-
 def _slot_for_object(action, obj):
     identifier = "OB" + obj.name
     for slot in action.slots:
@@ -208,9 +204,10 @@ def _object_world_matrix(obj, frame, fcurve_maps):
     return obj.matrix_world.copy()
 
 
-def _pose_matrix(bone, basis, pose_matrices):
+def _pose_matrix(bone, basis, pose_matrices, use_connect=True):
+    """Pose matrix of a bone, ``use_connect=False`` treats it as disconnected (its location is used)."""
     parent = bone.parent
-    if bone.use_connect:
+    if use_connect and bone.use_connect:
         # Location of connected bones is ignored by Blender.
         basis = basis.copy()
         basis.translation = (0.0, 0.0, 0.0)
@@ -276,11 +273,11 @@ class ANIM_OT_fbx_animation_to_armature(Operator, ImportHelper):
         name="Location",
         description="Which bones receive location animation",
         items=(
+            ('ALL', "All Bones", "Transfer location for every bone"),
             ('ROOT_HIPS', "Root and Hips",
              "Transfer location only for root bones and the hips (safe for different proportions)"),
-            ('ALL', "All Bones", "Transfer location for every bone"),
         ),
-        default='ROOT_HIPS',
+        default='ALL',
     )
     hips_bone: StringProperty(
         name="Hips Bone",
@@ -348,6 +345,9 @@ class ANIM_OT_fbx_animation_to_armature(Operator, ImportHelper):
                     results.extend(self._import_file(context, target, filepath, skipped_bones))
                 except RuntimeError as ex:
                     self.report({'WARNING'}, "{:s}: {:s}".format(os.path.basename(filepath), str(ex)))
+            disconnect_bones = set().union(*(names for _action, _slot, names in results))
+            if disconnect_bones:
+                self._disconnect_bones(context, target, disconnect_bones)
         finally:
             for obj in context.selected_objects:
                 obj.select_set(False)
@@ -363,7 +363,7 @@ class ANIM_OT_fbx_animation_to_armature(Operator, ImportHelper):
             self.report({'ERROR'}, "No animation was imported")
             return {'CANCELLED'}
 
-        action, slot = results[-1]
+        action, slot, _names = results[-1]
         anim_data = target.animation_data or target.animation_data_create()
         anim_data.action = action
         anim_data.action_slot = slot
@@ -373,12 +373,27 @@ class ANIM_OT_fbx_animation_to_armature(Operator, ImportHelper):
             text = ", ".join(names[:30]) + (" ..." if len(names) > 30 else "")
             self.report({'WARNING'}, "Bones not found in \"{:s}\" ({:d}): {:s}".format(
                 target.name, len(names), text))
+        if disconnect_bones:
+            self.report({'WARNING'}, "Disconnected bones to allow their movement: {:s}".format(
+                ", ".join(sorted(disconnect_bones))))
         self.report({'INFO'}, "Imported {:d} action(s): {:s}".format(
-            len(results), ", ".join(action.name for action, _slot in results)))
+            len(results), ", ".join(action.name for action, _slot, _names in results)))
         return {'FINISHED'}
 
+    @staticmethod
+    def _disconnect_bones(context, target, bone_names):
+        """Clear "Connected" of the bones, so that their location animation is not ignored."""
+        context.view_layer.objects.active = target
+        bpy.ops.object.mode_set(mode='EDIT')
+        try:
+            edit_bones = target.data.edit_bones
+            for name in bone_names:
+                edit_bones[name].use_connect = False
+        finally:
+            bpy.ops.object.mode_set(mode='OBJECT')
+
     def _import_file(self, context, target, filepath, skipped_bones):
-        """Import one FBX file, return a list of (action, slot) created for the target."""
+        """Import one FBX file, return a list of (action, slot, bones to disconnect) created for the target."""
         snapshot = _ids_snapshot()
         temp_ids = None
         try:
@@ -451,7 +466,11 @@ class ANIM_OT_fbx_animation_to_armature(Operator, ImportHelper):
             location_bones = {bone.name for bone in target_order}
         else:
             location_bones = _location_bone_names(target.data, self.hips_bone)
-        location_bones = _without_connected(target.data, location_bones)
+        # Connected bones that get location are posed as disconnected, then actually disconnected
+        # if the animation moves them (the FBX importer connects bones, e.g. the hips to the root).
+        connected_location_bones = {
+            name for name in location_bones if name in mapping and target.data.bones[name].use_connect
+        }
 
         target_world_inv = target.matrix_world.inverted_safe()
         source_prefix = {
@@ -468,7 +487,8 @@ class ANIM_OT_fbx_animation_to_armature(Operator, ImportHelper):
             source_pose = {}
             for bone in source_order:
                 basis = _eval_basis(source_fcurves, source_prefix[bone.name], source.pose.bones[bone.name], frame)
-                source_pose[bone.name] = _pose_matrix(bone, basis, source_pose)
+                # The importer may connect animated bones (the hips to the root): use their location anyway.
+                source_pose[bone.name] = _pose_matrix(bone, basis, source_pose, use_connect=False)
 
             target_pose = {}
             for bone in target_order:
@@ -509,7 +529,18 @@ class ANIM_OT_fbx_animation_to_armature(Operator, ImportHelper):
                     channels["location"].append(tuple(loc))
                     channels["rotation"].append(value)
                     channels["scale"].append(tuple(scale))
-                target_pose[bone.name] = _pose_matrix(bone, basis, target_pose)
+                target_pose[bone.name] = _pose_matrix(
+                    bone, basis, target_pose, use_connect=bone.name not in connected_location_bones)
+
+        # Connected bones that the animation does not move stay connected.
+        disconnect_bones = set()
+        for bone_name in connected_location_bones:
+            channels = keys[bone_name]
+            tolerance = max(target.data.bones[bone_name].length, 1e-3) * 1e-3
+            if any(Vector(loc).length > tolerance for loc in channels["location"]):
+                disconnect_bones.add(bone_name)
+            else:
+                location_bones.discard(bone_name)
 
         action = bpy.data.actions.new(name)
         action.use_fake_user = True
@@ -538,7 +569,7 @@ class ANIM_OT_fbx_animation_to_armature(Operator, ImportHelper):
                 for index in range(len(values[0])):
                     _write_fcurve(channelbag, prefix + prop, index, bone.name,
                                   frame_list, [value[index] for value in values])
-        return action, slot
+        return action, slot, disconnect_bones
 
 
 classes = (
