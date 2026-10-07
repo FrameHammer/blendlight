@@ -1624,6 +1624,107 @@ static void bone_draw_wire(const Armatures::DrawContext *ctx,
   }
 }
 
+/* -------------------------------------------------------------------- */
+/** \name Maya-style joints
+ * \{ */
+
+/* Радиус сферы джоинта в единицах арматуры (аналог Joint Size в Maya). */
+static constexpr float MAYA_JOINT_RADIUS = 0.03f;
+/* Минимальная толщина линий: без неё невыделенный скелет в Object Mode невидим
+ * (у невыделенной арматуры ctx->const_wire == 0). */
+static constexpr float MAYA_JOINT_MIN_WIRE = 1.0f;
+
+/* Базис сегмента: dir — направление на дочерний джоинт, X и Z — перпендикуляры к нему. */
+static void maya_segment_basis(const float4x4 &joint_mat,
+                               const float3 &dir,
+                               float3 &r_x,
+                               float3 &r_z)
+{
+  float3 x = math::normalize(joint_mat.x_axis());
+  x -= dir * math::dot(x, dir);
+  if (math::length_squared(x) < 1e-8f) {
+    ortho_v3_v3(x, dir);
+  }
+  r_x = math::normalize(x);
+  r_z = math::cross(r_x, dir);
+}
+
+static void bone_draw_maya_joint(const Armatures::DrawContext *ctx,
+                                 const UnifiedBonePtr bone,
+                                 const eBone_Flag boneflag,
+                                 const int select_id)
+{
+  const bPoseChannel *pchan = bone.as_posebone();
+  const float *col_solid = get_bone_solid_with_consts_color(ctx, bone, boneflag);
+
+  float col_wire[4];
+  copy_v4_v4(col_wire, get_bone_wire_color(ctx, boneflag));
+  col_wire[3] = max_ff(col_wire[3], MAYA_JOINT_MIN_WIRE);
+
+  auto sel_id = ctx->res->select_id(*ctx->ob_ref, select_id | BONESEL_BONE);
+  const bool is_select = ctx->res->is_selection();
+  const float4x4 &obmat = ctx->ob->object_to_world();
+  const float r = MAYA_JOINT_RADIUS;
+
+  const float4x4 joint_mat = float4x4(pchan->pose_mat);
+  const float3 head = joint_mat.location();
+
+  /* 1. Сфера джоинта: только контур (в единичном пространстве радиус 0.05). */
+  float4x4 sphere_mat = float4x4::identity();
+  sphere_mat.x_axis() *= r * 20.0f;
+  sphere_mat.y_axis() *= r * 20.0f;
+  sphere_mat.z_axis() *= r * 20.0f;
+  sphere_mat.location() = head;
+  sphere_mat = obmat * sphere_mat;
+
+  ctx->bone_buf->sphere_outline_buf.append({sphere_mat, col_wire}, sel_id);
+  if (is_select) {
+    /* Невидимая заливка только для клика. */
+    ctx->bone_buf->sphere_fill_buf.append({sphere_mat, col_solid, col_solid}, sel_id);
+  }
+
+  /* 2. Пирамидки к каждому видимому дочернему джоинту. */
+  for (bPoseChannel *child : ListBaseWrapper<bPoseChannel>(ctx->ob->pose->chanbase)) {
+    if (child->parent != pchan) {
+      continue;
+    }
+    if (!animrig::bone_is_visible(ctx->armature, {child, child->bone_get(*ctx->ob)})) {
+      continue;
+    }
+    const float3 child_head = float3(child->pose_mat[3]);
+    float3 dir = child_head - head;
+    const float len = math::length(dir);
+    if (len < 2.0f * r) {
+      continue; /* Джоинты почти совпадают. */
+    }
+    dir /= len;
+
+    float3 x, z;
+    maya_segment_basis(joint_mat, dir, x, z);
+
+    /* Вершина пирамидки упирается в сферу дочернего джоинта. */
+    const float3 apex = math::transform_point(obmat, child_head - dir * r);
+    const float3 base[4] = {head + x * r, head + z * r, head - x * r, head - z * r};
+    for (const float3 &b : base) {
+      ctx->bone_buf->wire_buf.append(
+          math::transform_point(obmat, b), apex, float4(col_wire), sel_id);
+    }
+
+    if (is_select) {
+      /* Невидимый октаэдр вдоль сегмента (полуширина октаэдра 0.1), чтобы кликать по всей пирамидке. */
+      float4x4 seg_mat = float4x4::identity();
+      seg_mat.x_axis() = x * (r * 10.0f);
+      seg_mat.y_axis() = dir * len;
+      seg_mat.z_axis() = z * (r * 10.0f);
+      seg_mat.location() = head;
+      ctx->bone_buf->octahedral_fill_buf.append({obmat * seg_mat, col_solid, col_solid},
+                                                sel_id);
+    }
+  }
+}
+
+/** \} */
+
 static void bone_draw(const eArmature_Drawtype drawtype,
                       const bool use_custom_shape,
                       const Armatures::DrawContext *ctx,
@@ -1638,7 +1739,12 @@ static void bone_draw(const eArmature_Drawtype drawtype,
 
   switch (drawtype) {
     case ARM_DRAW_TYPE_OCTA:
-      bone_draw_octa(ctx, bone, boneflag, select_id);
+      if (bone.is_posebone()) {
+        bone_draw_maya_joint(ctx, bone, boneflag, select_id);
+      }
+      else {
+        bone_draw_octa(ctx, bone, boneflag, select_id);
+      }
       break;
     case ARM_DRAW_TYPE_STICK:
       bone_draw_line(ctx, bone, boneflag, select_id);
