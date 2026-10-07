@@ -308,7 +308,6 @@ def import_panel_armature(layout, operator):
         sub.prop(operator, "secondary_bone_axis")
 
 
-@orientation_helper(axis_forward='-Z', axis_up='Y')
 class ExportFBX(bpy.types.Operator, ExportHelper):
     """Write a FBX file"""
     bl_idname = "export_scene.fbx"
@@ -317,6 +316,33 @@ class ExportFBX(bpy.types.Operator, ExportHelper):
 
     filename_ext = ".fbx"
     filter_glob: StringProperty(default="*.fbx", options={'HIDDEN'})
+
+    # Fixed settings (Maya-style Y-up file): hidden from the UI and not remembered between exports,
+    # they can still be set from Python.
+    axis_forward: EnumProperty(
+        name="Forward",
+        items=(('X', "X Forward", ""),
+               ('Y', "Y Forward", ""),
+               ('Z', "Z Forward", ""),
+               ('-X', "-X Forward", ""),
+               ('-Y', "-Y Forward", ""),
+               ('-Z', "-Z Forward", ""),
+               ),
+        default='-Z',
+        options={'HIDDEN', 'SKIP_SAVE'},
+    )
+    axis_up: EnumProperty(
+        name="Up",
+        items=(('X', "X Up", ""),
+               ('Y', "Y Up", ""),
+               ('Z', "Z Up", ""),
+               ('-X', "-X Up", ""),
+               ('-Y', "-Y Up", ""),
+               ('-Z', "-Z Up", ""),
+               ),
+        default='Y',
+        options={'HIDDEN', 'SKIP_SAVE'},
+    )
 
     # List of operator properties, the attributes will be assigned
     # to the class instance from the operator settings before calling.
@@ -370,6 +396,8 @@ class ExportFBX(bpy.types.Operator, ExportHelper):
         description="How to apply custom and units scalings in generated FBX file "
         "(Blender uses FBX scale to detect units on import, "
         "but many other applications do not handle the same way)",
+        default='FBX_SCALE_UNITS',
+        options={'HIDDEN', 'SKIP_SAVE'},
     )
 
     use_space_transform: BoolProperty(
@@ -468,7 +496,8 @@ class ExportFBX(bpy.types.Operator, ExportHelper):
         name="Add Leaf Bones",
         description="Append a final bone to the end of each chain to specify last bone length "
         "(use this when you intend to edit the armature from exported data)",
-        default=True  # False for commit!
+        default=False,
+        options={'HIDDEN', 'SKIP_SAVE'},
     )
     primary_bone_axis: EnumProperty(
         name="Primary Bone Axis",
@@ -502,11 +531,13 @@ class ExportFBX(bpy.types.Operator, ExportHelper):
         items=(('NULL', "Null", "'Null' FBX node, similar to Blender's Empty (default)"),
                ('ROOT', "Root", "'Root' FBX node, supposed to be the root of chains of bones..."),
                ('LIMBNODE', "LimbNode", "'LimbNode' FBX node, a regular joint between two bones..."),
+               ('NONE', "None", "No FBX node for the armature, its root bones are at the top level of the file"),
                ),
         description="FBX type of node (object) used to represent Blender's armatures "
         "(use the Null type unless you experience issues with the other app, "
         "as other choices may not import back perfectly into Blender...)",
-        default='NULL',
+        default='NONE',
+        options={'HIDDEN', 'SKIP_SAVE'},
     )
     bake_anim: BoolProperty(
         name="Baked Animation",
@@ -518,6 +549,7 @@ class ExportFBX(bpy.types.Operator, ExportHelper):
         description="Force exporting at least one key of animation for all bones "
         "(needed with some target applications, like UE4)",
         default=True,
+        options={'HIDDEN', 'SKIP_SAVE'},
     )
     bake_anim_use_nla_strips: BoolProperty(
         name="NLA Strips",
@@ -536,6 +568,7 @@ class ExportFBX(bpy.types.Operator, ExportHelper):
         name="Force Start/End Keying",
         description="Always add a keyframe at start and end of actions for animated channels",
         default=True,
+        options={'HIDDEN', 'SKIP_SAVE'},
     )
     bake_anim_step: FloatProperty(
         name="Sampling Rate",
@@ -549,7 +582,8 @@ class ExportFBX(bpy.types.Operator, ExportHelper):
         description="How much to simplify baked values (0.0 to disable, the higher the more simplified)",
         min=0.0, max=100.0,  # No simplification to up to 10% of current magnitude tolerance.
         soft_min=0.0, soft_max=10.0,
-        default=1.0,  # default: min slope: 0.005, max frame step: 10.
+        default=0.0,
+        options={'HIDDEN', 'SKIP_SAVE'},
     )
     path_mode: path_reference_mode
     embed_textures: BoolProperty(
@@ -655,11 +689,6 @@ def export_panel_transform(layout, operator):
     header.label(text="Transform")
     if body:
         body.prop(operator, "global_scale")
-        body.prop(operator, "apply_scale_options")
-
-        body.prop(operator, "axis_forward")
-        body.prop(operator, "axis_up")
-
         body.prop(operator, "apply_unit_scale")
         body.prop(operator, "use_space_transform")
         row = body.row()
@@ -692,9 +721,7 @@ def export_panel_armature(layout, operator):
     if body:
         body.prop(operator, "primary_bone_axis")
         body.prop(operator, "secondary_bone_axis")
-        body.prop(operator, "armature_nodetype")
         body.prop(operator, "use_armature_deform_only")
-        body.prop(operator, "add_leaf_bones")
 
 
 def export_panel_animation(layout, operator):
@@ -704,12 +731,9 @@ def export_panel_animation(layout, operator):
     header.label(text="Animation")
     if body:
         body.enabled = operator.bake_anim
-        body.prop(operator, "bake_anim_use_all_bones")
         body.prop(operator, "bake_anim_use_nla_strips")
         body.prop(operator, "bake_anim_use_all_actions")
-        body.prop(operator, "bake_anim_force_startend_keying")
         body.prop(operator, "bake_anim_step")
-        body.prop(operator, "bake_anim_simplify_factor")
 
 
 def menu_func_import(self, context):

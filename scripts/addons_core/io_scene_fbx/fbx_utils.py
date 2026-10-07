@@ -1745,6 +1745,10 @@ class ObjectWrapper(metaclass=MetaObjectWrapper):
             return True
         return False
 
+    def is_armature_without_node(self, settings):
+        """Armature written without its own FBX node: its bones and children are at the top level of the file."""
+        return settings.armature_nodetype == 'NONE' and self._tag == 'OB' and self.bdata.type == 'ARMATURE'
+
     def use_bake_space_transform(self, scene_data):
         # NOTE: Only applies to object types supporting this!!! Currently, only meshes and the like...
         # TODO: Check whether this can work for bones too...
@@ -1774,6 +1778,10 @@ class ObjectWrapper(metaclass=MetaObjectWrapper):
         # Since we have to apply corrections to some types of object, we always need local Blender space here...
         matrix = self.matrix_rest_local if rest else self.matrix_local
         parent = self.parent
+
+        # Root bones and children of an armature written without its own FBX node are in world space.
+        if not local_space and parent and parent.is_armature_without_node(scene_data.settings):
+            is_global = True
 
         # Bones, lamps and cameras need to be rotated (in local space!).
         if self._tag == 'BO':

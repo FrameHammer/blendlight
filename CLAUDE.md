@@ -184,3 +184,14 @@ static void bone_draw_maya_joint(const Armatures::DrawContext *ctx,
   **объектом арматуры**, а не костью; его анимация — на объекте. Оператор сопоставляет такой объект
   с корневой костью цели по имени объекта (без суффикса `.001`).
 - Временные Actions импортёра переименовываются перед созданием результата — иначе имя получало `.001`.
+
+## FBX-экспорт под Maya (2026-10-08)
+Правится штатный экспортёр `scripts/addons_core/io_scene_fbx` (оператор `export_scene.fbx`, File → Export → FBX).
+- Зафиксированы и скрыты из окна экспорта (`HIDDEN` + `SKIP_SAVE`, из Python задать можно):
+  Forward -Z / Up Y, Apply Scalings = FBX Units Scale, Add Leaf Bones = выкл, Key All Bones = вкл,
+  Force Start/End Keying = вкл, Simplify = 0, Armature FBXNode Type = `NONE`.
+- `NONE` — новый режим: у арматуры нет своего узла в FBX, корневые кости на верхнем уровне файла.
+  Реализация — `ObjectWrapper.is_armature_without_node()` в `fbx_utils.py` и проверки в `export_fbx_bin.py`
+  (модель, Null-атрибут, связи, BindPose, анимация). Движение объекта арматуры запекается в корневые кости
+  и в детей арматуры.
+- Проверено реимпортом: позы костей, скиннутый меш и дети арматуры совпадают с оригиналом.

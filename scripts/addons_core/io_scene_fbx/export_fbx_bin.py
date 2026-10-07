@@ -738,7 +738,8 @@ def fbx_data_bindpose_element(root, me_obj, me, scene_data, arm_obj=None, mat_wo
 
     elem_data_single_string(fbx_pose, b"Type", b"BindPose")
     elem_data_single_int32(fbx_pose, b"Version", FBX_POSE_BIND_VERSION)
-    elem_data_single_int32(fbx_pose, b"NbPoseNodes", 1 + (1 if (arm_obj != me_obj) else 0) + len(bones))
+    use_arm_node = arm_obj != me_obj and not arm_obj.is_armature_without_node(scene_data.settings)
+    elem_data_single_int32(fbx_pose, b"NbPoseNodes", 1 + (1 if use_arm_node else 0) + len(bones))
 
     # First node is mesh/object.
     mat_world_obj = me_obj.fbx_object_matrix(scene_data, global_space=True)
@@ -746,7 +747,7 @@ def fbx_data_bindpose_element(root, me_obj, me, scene_data, arm_obj=None, mat_wo
     elem_data_single_int64(fbx_posenode, b"Node", me_obj.fbx_uuid)
     elem_data_single_float64_array(fbx_posenode, b"Matrix", matrix4_to_array(mat_world_obj))
     # Second node is armature object itself.
-    if arm_obj != me_obj:
+    if use_arm_node:
         fbx_posenode = elem_empty(fbx_pose, b"PoseNode")
         elem_data_single_int64(fbx_posenode, b"Node", arm_obj.fbx_uuid)
         elem_data_single_float64_array(fbx_posenode, b"Matrix", matrix4_to_array(mat_world_arm))
@@ -2161,7 +2162,8 @@ def fbx_skeleton_from_armature(scene, settings, arm_obj, objects, data_meshes,
     arm_parents is a set of tuples (armature, object) for all successful armature bindings.
     """
     # We need some data for our armature 'object' too!!!
-    data_empties[arm_obj] = get_blender_empty_key(arm_obj.bdata)
+    if not arm_obj.is_armature_without_node(settings):
+        data_empties[arm_obj] = get_blender_empty_key(arm_obj.bdata)
 
     arm_data = arm_obj.bdata.data
     bones = {}
@@ -2269,6 +2271,10 @@ def fbx_animations_do(scene_data, ref_id, f_start, f_end, start_zero, objects=No
                 continue
             if ob_obj.type == 'ARMATURE':
                 objects |= {bo_obj for bo_obj in ob_obj.bones if bo_obj in scene_data.objects}
+                if ob_obj.is_armature_without_node(scene_data.settings):
+                    # Children are not under an armature node anymore, the armature motion has to be baked into them.
+                    objects |= {child for child in scene_data.objects
+                                if child.is_object and not child.parented_to_armature and child.parent == ob_obj}
             for dp_obj in ob_obj.dupli_list_gen(depsgraph):
                 if dp_obj in scene_data.objects:
                     objects.add(dp_obj)
@@ -2280,7 +2286,7 @@ def fbx_animations_do(scene_data, ref_id, f_start, f_end, start_zero, objects=No
     p_rots = {}
 
     for ob_obj in objects:
-        if ob_obj.parented_to_armature:
+        if ob_obj.parented_to_armature or ob_obj.is_armature_without_node(scene_data.settings):
             continue
         ACNW = AnimationCurveNodeWrapper
         loc, rot, scale, _m, _mr = ob_obj.fbx_object_tx(scene_data)
@@ -2988,7 +2994,8 @@ def fbx_data_from_scene(scene, depsgraph, settings):
         templates[b"Geometry"] = fbx_template_def_geometry(scene, settings, nbr_users=nbr)
 
     if objects:
-        templates[b"Model"] = fbx_template_def_model(scene, settings, nbr_users=len(objects))
+        nbr_models = sum(1 for ob_obj in objects if not ob_obj.is_armature_without_node(settings))
+        templates[b"Model"] = fbx_template_def_model(scene, settings, nbr_users=nbr_models)
 
     if arm_parents:
         # Number of Pose|BindPose elements should be the same as number of meshes-parented-to-armatures
@@ -3049,11 +3056,14 @@ def fbx_data_from_scene(scene, depsgraph, settings):
 
     # Objects (with classical parenting).
     for ob_obj in objects:
+        if ob_obj.is_armature_without_node(settings):
+            continue
         # Bones are handled later.
         if not ob_obj.is_bone:
             par_obj = ob_obj.parent
             # Meshes parented to armature are handled separately, yet we want the 'no parent' connection (0).
-            if par_obj and ob_obj.has_valid_parent(objects) and (par_obj, ob_obj) not in arm_parents:
+            if (par_obj and ob_obj.has_valid_parent(objects) and (par_obj, ob_obj) not in arm_parents and
+                    not par_obj.is_armature_without_node(settings)):
                 connections.append((b"OO", ob_obj.fbx_uuid, par_obj.fbx_uuid, None))
             else:
                 connections.append((b"OO", ob_obj.fbx_uuid, 0, None))
@@ -3063,10 +3073,16 @@ def fbx_data_from_scene(scene, depsgraph, settings):
         par_obj = bo_obj.parent
         if par_obj not in objects:
             continue
+        if par_obj.is_armature_without_node(settings):
+            # Root bones of an armature without its own node are at the top level.
+            connections.append((b"OO", bo_obj.fbx_uuid, 0, None))
+            continue
         connections.append((b"OO", bo_obj.fbx_uuid, par_obj.fbx_uuid, None))
 
     # Object data.
     for ob_obj in objects:
+        if ob_obj.is_armature_without_node(settings):
+            continue
         if ob_obj.is_bone:
             bo_data_key = data_bones[ob_obj]
             connections.append((b"OO", get_fbx_uuid_from_key(bo_data_key), ob_obj.fbx_uuid, None))
@@ -3422,7 +3438,8 @@ def fbx_objects_elements(root, scene_data):
     for ob_obj in scene_data.objects:
         if ob_obj.is_dupli:
             continue
-        fbx_data_object_elements(objects, ob_obj, scene_data)
+        if not ob_obj.is_armature_without_node(scene_data.settings):
+            fbx_data_object_elements(objects, ob_obj, scene_data)
         for dp_obj in ob_obj.dupli_list_gen(scene_data.depsgraph):
             if dp_obj not in scene_data.objects:
                 continue
